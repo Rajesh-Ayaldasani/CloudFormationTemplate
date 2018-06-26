@@ -1,0 +1,144 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: Creates an API Service.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VpcId of your existing Virtual Private Cloud (VPC)
+    ConstraintDescription: must be the VPC Id of an existing Virtual Private Cloud.
+  ListenerArn:
+    Type: String
+    Description: Enter Listener Arn of existing ALB
+  ClusterID:
+    Type: String
+    Description: Cluster ID of your Ecs Service
+  LogRetention:
+    Type: Number
+    Description: Log Retention (Days)
+    Default: 7
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653]
+  DesiredCount:
+    Type: Number
+    Description: The desired number of application instances
+    Default: 1
+  DockerImage:
+    Type: String
+    Description: Docker Image Registry/Organization Base URI
+    Default: httpd
+  ServiceName:
+    Description: Name of the service
+    Type: String
+    Default: api
+
+Resources:
+  EcsServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceRole
+
+  ApiServiceLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    Properties:
+      LogGroupName:
+        Fn::Sub: ${AWS::StackName}/ecs/Service/app
+      RetentionInDays:
+        Ref: LogRetention
+
+
+  HTTPSListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+        ListenerArn:
+          Ref: ListenerArn  
+        Priority: 100
+        Conditions:
+            - Field: host-header
+              Values:
+                - 'abc.punchh.com'
+        Actions:
+            - TargetGroupArn: !Ref ApiServiceTargetGroup
+              Type: forward
+  
+
+  ApiServiceTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId:
+         Ref: VpcId
+      HealthCheckPath: /ping
+      HealthCheckIntervalSeconds: 60
+      UnhealthyThresholdCount: 10
+      HealthyThresholdCount: 2
+      HealthCheckTimeoutSeconds: 10
+      Protocol: HTTP
+      Port: 80
+      TargetGroupAttributes: 
+        - Key: deregistration_delay.timeout_seconds
+          Value: 60
+
+  ApiService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - ApiServiceLogGroup
+    Properties:
+      HealthCheckGracePeriodSeconds: 30
+      LaunchType: EC2
+      PlacementStrategies:
+        - Type: spread
+          Field: attribute:ecs.availability-zone
+        - Type: binpack
+          Field: memory
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 50
+      LoadBalancers:
+        - ContainerName: app
+          ContainerPort: 80
+          TargetGroupArn:
+            Ref: ApiServiceTargetGroup
+      Role:
+        Ref: EcsServiceRole
+      TaskDefinition:
+        Ref: ApiTaskDefinition
+      Cluster:
+        Ref: ClusterID
+      DesiredCount:
+        Ref: DesiredCount
+
+  ApiTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Ref ServiceName
+      ContainerDefinitions:
+          - Name: app
+            Essential: true
+            Image: 
+              Ref: DockerImage
+            Memory: 256
+            Cpu: 1024
+            PortMappings:
+              - ContainerPort: 80
+            Ulimits:
+              - HardLimit: 65536
+                Name: nofile
+                SoftLimit: 65536
+            LogConfiguration:
+              LogDriver: awslogs
+              Options:
+                awslogs-group:
+                  Fn::Sub: ${AWS::StackName}/ecs/Service/app
+                awslogs-region:
+                  Ref: AWS::Region
+                awslogs-stream-prefix: docker
